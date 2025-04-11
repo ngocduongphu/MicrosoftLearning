@@ -206,6 +206,52 @@ New-AzRoleAssignment -SignInName $userName -RoleDefinitionName "Storage Blob Dat
 # Create database
 write-host "Creating the $sqlDatabaseName database..."
 Invoke-Sqlcmd -ServerInstance "$synapseWorkspace.sql.azuresynapse.net" -Database $sqlDatabaseName -Username $sqlUser -Password $sqlPassword -InputFile "setup.sql"
+# Load data
+write-host "Loading data..."
+Get-ChildItem "./data/*.txt" -File | ForEach-Object {
+    Write-Host ""
+    $filePath = $_.FullName
+    $fileName = $_.Name
+    $table = $fileName.Replace(".txt","")
+    Write-Host "Loading $fileName into table [$table]..."
+
+    # Cần điều chỉnh tên cột theo từng bảng cụ thể
+    # Ví dụ: bảng currency có 4 cột: ID, Code, Name, Format
+    # Bạn có thể map cụ thể theo tên bảng hoặc hardcode cột nếu đơn giản
+    switch ($table.ToLower()) {
+        "currency" {
+            $columns = "ID, Code, CurrencyName, FormatString"
+        }
+        default {
+            Write-Host "Không xác định được tên cột cho bảng $table. Bỏ qua file này."
+            return
+        }
+    }
+
+    # Đọc tất cả dòng (không có header)
+    $dataLines = Get-Content $filePath
+
+    foreach ($line in $dataLines) {
+        $values = $line.Split("`t") | ForEach-Object {
+            if ($_ -match '^\d+(\.\d+)?$') {
+                $_  # số
+            } elseif ([string]::IsNullOrWhiteSpace($_)) {
+                "NULL"
+            } else {
+                "'$_'"  # chuỗi có nháy đơn
+            }
+        }
+
+        $valueString = $values -join ", "
+        $insertQuery = "INSERT INTO dbo.$table ($columns) VALUES ($valueString);"
+
+        Invoke-Sqlcmd -ServerInstance "$synapseWorkspace.sql.azuresynapse.net" `
+                      -Database $sqlDatabaseName `
+                      -Username $sqlUser `
+                      -Password $sqlPassword `
+                      -Query $insertQuery
+    }
+}
 
 # Pause SQL Pool
 write-host "Pausing the $sqlDatabaseName SQL Pool..."
@@ -215,44 +261,14 @@ Suspend-AzSynapseSqlPool -WorkspaceName $synapseWorkspace -Name $sqlDatabaseName
 write-host "Loading data..."
 $storageAccount = Get-AzStorageAccount -ResourceGroupName $resourceGroupName -Name $dataLakeAccountName
 $storageContext = $storageAccount.Context
-Get-ChildItem "./data/*.txt" -File | ForEach-Object {
-    $table = $_.Name.Replace(".txt", "")
-    $filePath = $_.FullName
-    $csvData = Import-Csv -Path $filePath
-
-    # Tạo DataTable và thêm các cột
-    $dataTable = New-Object System.Data.DataTable
-    foreach ($col in $csvData[0].PSObject.Properties.Name) {
-        $dataTable.Columns.Add($col) | Out-Null
-    }
-
-    # Thêm từng hàng vào DataTable
-    foreach ($row in $csvData) {
-        $dataRow = $dataTable.NewRow()
-        foreach ($col in $row.PSObject.Properties.Name) {
-            $dataRow[$col] = $row.$col
-        }
-        $dataTable.Rows.Add($dataRow)
-    }
-
-    # Tạo kết nối SQL
-    $connectionString = "Server=$synapseWorkspace.sql.azuresynapse.net;Database=$sqlDatabaseName;User Id=$sqlUser;Password=$sqlPassword;"
-    $connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
-    $connection.Open()
-
-    # Sử dụng SqlBulkCopy
-    $bulkCopy = New-Object System.Data.SqlClient.SqlBulkCopy($connection)
-    $bulkCopy.DestinationTableName = "dbo.$table"
-
-    try {
-        $bulkCopy.WriteToServer($dataTable)
-        Write-Host "Data loaded successfully into $table"
-    } catch {
-        Write-Host "Error loading data: $_"
-    } finally {
-        $connection.Close()
-    }
+Get-ChildItem "./files/*.csv" -File | Foreach-Object {
+    write-host ""
+    $file = $_.Name
+    Write-Host $file
+    $blobPath = "sales_data/$file"
+    Set-AzStorageBlobContent -File $_.FullName -Container "files" -Blob $blobPath -Context $storageContext
 }
+
 # Create KQL script
 # Removing until fix for Bad Request error is resolved
 # New-AzSynapseKqlScript -WorkspaceName $synapseWorkspace -DefinitionFile "./files/ingest-data.kql"
