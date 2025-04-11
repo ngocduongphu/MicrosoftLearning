@@ -207,14 +207,6 @@ New-AzRoleAssignment -SignInName $userName -RoleDefinitionName "Storage Blob Dat
 write-host "Creating the $sqlDatabaseName database..."
 Invoke-Sqlcmd -ServerInstance "$synapseWorkspace.sql.azuresynapse.net" -Database $sqlDatabaseName -Username $sqlUser -Password $sqlPassword -InputFile "setup.sql"
 
-# Load data
-write-host "Loading data..."
-Get-ChildItem "./data/*.txt" -File | ForEach-Object {
-    $table = $_.Name.Replace(".txt", "")
-    $filePath = $_.FullName
-    Invoke-Sqlcmd -ServerInstance "$synapseWorkspace.sql.azuresynapse.net" -Database $sqlDatabaseName -Username $sqlUser -Password $sqlPassword -Query "BULK INSERT dbo.$table FROM '$filePath' WITH (FORMAT='CSV')"
-}
-
 # Pause SQL Pool
 write-host "Pausing the $sqlDatabaseName SQL Pool..."
 Suspend-AzSynapseSqlPool -WorkspaceName $synapseWorkspace -Name $sqlDatabaseName -AsJob
@@ -228,17 +220,32 @@ Get-ChildItem "./data/*.txt" -File | ForEach-Object {
     $filePath = $_.FullName
     $csvData = Import-Csv -Path $filePath
 
-    # Create SQL connection
+    # Tạo DataTable và thêm các cột
+    $dataTable = New-Object System.Data.DataTable
+    foreach ($col in $csvData[0].PSObject.Properties.Name) {
+        $dataTable.Columns.Add($col) | Out-Null
+    }
+
+    # Thêm từng hàng vào DataTable
+    foreach ($row in $csvData) {
+        $dataRow = $dataTable.NewRow()
+        foreach ($col in $row.PSObject.Properties.Name) {
+            $dataRow[$col] = $row.$col
+        }
+        $dataTable.Rows.Add($dataRow)
+    }
+
+    # Tạo kết nối SQL
     $connectionString = "Server=$synapseWorkspace.sql.azuresynapse.net;Database=$sqlDatabaseName;User Id=$sqlUser;Password=$sqlPassword;"
     $connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
     $connection.Open()
 
-    # Use SqlBulkCopy
+    # Sử dụng SqlBulkCopy
     $bulkCopy = New-Object System.Data.SqlClient.SqlBulkCopy($connection)
     $bulkCopy.DestinationTableName = "dbo.$table"
 
     try {
-        $bulkCopy.WriteToServer($csvData)
+        $bulkCopy.WriteToServer($dataTable)
         Write-Host "Data loaded successfully into $table"
     } catch {
         Write-Host "Error loading data: $_"
