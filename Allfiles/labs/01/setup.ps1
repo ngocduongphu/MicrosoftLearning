@@ -223,14 +223,29 @@ Suspend-AzSynapseSqlPool -WorkspaceName $synapseWorkspace -Name $sqlDatabaseName
 write-host "Loading data..."
 $storageAccount = Get-AzStorageAccount -ResourceGroupName $resourceGroupName -Name $dataLakeAccountName
 $storageContext = $storageAccount.Context
-Get-ChildItem "./files/*.csv" -File | Foreach-Object {
-    write-host ""
-    $file = $_.Name
-    Write-Host $file
-    $blobPath = "sales_data/$file"
-    Set-AzStorageBlobContent -File $_.FullName -Container "files" -Blob $blobPath -Context $storageContext
-}
+Get-ChildItem "./data/*.txt" -File | ForEach-Object {
+    $table = $_.Name.Replace(".txt", "")
+    $filePath = $_.FullName
+    $csvData = Import-Csv -Path $filePath
 
+    # Create SQL connection
+    $connectionString = "Server=$synapseWorkspace.sql.azuresynapse.net;Database=$sqlDatabaseName;User Id=$sqlUser;Password=$sqlPassword;"
+    $connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
+    $connection.Open()
+
+    # Use SqlBulkCopy
+    $bulkCopy = New-Object System.Data.SqlClient.SqlBulkCopy($connection)
+    $bulkCopy.DestinationTableName = "dbo.$table"
+
+    try {
+        $bulkCopy.WriteToServer($csvData)
+        Write-Host "Data loaded successfully into $table"
+    } catch {
+        Write-Host "Error loading data: $_"
+    } finally {
+        $connection.Close()
+    }
+}
 # Create KQL script
 # Removing until fix for Bad Request error is resolved
 # New-AzSynapseKqlScript -WorkspaceName $synapseWorkspace -DefinitionFile "./files/ingest-data.kql"
